@@ -1,0 +1,550 @@
+---
+title: "Effect of VLCAD mutation"
+author: "Mark Ziemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    fig_width: 7
+    fig_height: 7
+theme: cosmo
+---
+
+Source: TBA
+
+## Introduction
+
+Here we analyse the effect of VLCAD mutation.
+
+Reads were mapped to the human transcriptome version 47 from GENCODE genes (gencode.v47.transcripts.fa).
+
+Genes with mean counts > 10 are classified as detected.
+
+Differential expression is conducted with DESeq2.
+
+Pathway enrichment analysis is conducted with mitch.
+
+Gene sets were obtained from the gene ontology database (q3 2023). Biological process sets were used.
+
+```{r,packages}
+
+suppressPackageStartupMessages({
+    library("zoo")
+    library("dplyr")
+    library("reshape2")
+    library("DESeq2")
+    library("gplots")
+    library("MASS")
+    library("mitch")
+    library("eulerr")
+    library("kableExtra")
+    library("beeswarm")
+
+library("network")
+
+})
+
+knitr::opts_chunk$set(dev = 'svg') # set output device to svg
+
+```
+
+## Import read counts
+
+```{r,importdata1}
+
+tmp <- read.table("3col.tsv.gz",header=F)
+x <- as.matrix(acast(tmp, V2~V1, value.var="V3", fun.aggregate = sum))
+x <- as.data.frame(x)
+accession <- sapply((strsplit(rownames(x),"\\|")),"[[",2)
+symbol<-sapply((strsplit(rownames(x),"\\|")),"[[",6)
+x$geneid <- paste(accession,symbol)
+xx <- aggregate(. ~ geneid,x,sum)
+rownames(xx) <- xx$geneid
+xx$geneid = NULL
+xx <- round(xx)
+head(xx)
+
+```
+
+## Sample sheet
+
+```{r,ss1}
+
+ss <- data.frame(colnames(xx))
+ss$case <- as.numeric(grepl("Mut",ss[,1]))
+rownames(ss) <- ss[,1]
+ss[,1] = NULL
+ss
+
+```
+
+
+## QC analysis
+
+Here I'll look at a few different quality control measures.
+
+```{r,qc1,fig.height=7,fig.width=7}
+
+par(mar=c(5,8,3,1))
+barplot(colSums(xx),horiz=TRUE,las=1,xlab="num reads")
+
+colSums(xx)
+
+```
+
+We have 47M to 68M assigned reads, which is very good.
+
+## MDS plot
+
+All sample cluster with others from the same group.
+Ctl and Mut samples are distinguished on dimension 2.
+No outliers recorded.
+
+```{r,mds1}
+
+cols <- c(rep("tan1",4),rep("violet",4))
+
+plot(cmdscale(dist(t(xx))), xlab="Coordinate 1", ylab="Coordinate 2",
+  type = "p",bty="n",pch=19, cex=4, col=cols)
+
+text(cmdscale(dist(t(xx))), labels=colnames(xx) )
+
+```
+
+## Correlation heatmap
+
+Correlation heatmap shows a slight batch effect with batch A consisting of replicates 1 and 2,
+while batch B consists of replicates 3 and 4.
+
+```{r,cor,fig.height=7,fig.width=7}
+
+heatmap.2(cor(xx),trace="n",main="Pearson correlation heatmap")
+
+cor(xx) %>% kbl(caption = "Pearson correlation coefficients") %>% kable_paper("hover", full_width = F)
+
+cor(xx,method="spearman") %>% kbl(caption = "Spearman correlation coefficients") %>% kable_paper("hover", full_width = F)
+
+```
+
+## Analysis of differential gene expression
+
+First we will look at control vs mutant with no filtering for low reads.
+Then we remove genes with fewer than 10 reads per sample on average and rerun DESeq2.
+
+```{r,dge1}
+
+dds <- DESeqDataSetFromMatrix(countData = xx , colData = ss, design = ~ case )
+res <- DESeq(dds)
+z<- results(res)
+vsd <- vst(dds, blind=FALSE)
+zz <- cbind(as.data.frame(z),assay(vsd))
+dge <- as.data.frame(zz[order(zz$pvalue),])
+head(dge,20) %>% kbl(caption = "Top gene expression changes caused by VLCAD mutation") %>% kable_paper("hover", full_width = F)
+
+nrow(dge)
+nrow(subset(dge,padj<0.05))
+
+dge[grep("ACADVL",rownames(dge)),]
+
+xxf <- xx[rowMeans(xx)>=10,]
+dim(xx) ; dim(xxf)
+
+dds <- DESeqDataSetFromMatrix(countData = xxf , colData = ss, design = ~ case )
+res <- DESeq(dds)
+z<- results(res)
+vsd <- vst(dds, blind=FALSE)
+zz <- cbind(as.data.frame(z),assay(vsd))
+dge <- as.data.frame(zz[order(zz$pvalue),])
+head(dge,20) %>% kbl(caption = "Top gene expression changes caused by VLCAD mutation") %>% kable_paper("hover", full_width = F)
+write.table(dge,file="deseq2_mut.tsv",quote=FALSE,sep='\t')
+
+nrow(dge)
+nrow(subset(dge,padj<0.05))
+
+dge[grep("ACADVL",rownames(dge)),]
+
+```
+
+## Make some  plots.
+
+```{r,plots1}
+
+maplot <- function(de,contrast_name) {
+  sig <-subset(de, padj < 0.05 )
+  up <-rownames(subset(de, padj < 0.05 & log2FoldChange > 0))
+  dn <-rownames(subset(de, padj < 0.05 & log2FoldChange < 0))
+  GENESUP <- length(up)
+  GENESDN <- length(dn)
+  DET=nrow(de)
+  SUBHEADER = paste(GENESUP, "up, ", GENESDN, "down", DET, "detected")
+  ns <-subset(de, padj > 0.05 )
+  plot(log2(de$baseMean),de$log2FoldChange, 
+       xlab="log2 basemean", ylab="log2 foldchange",
+       pch=19, cex=0.5, col="dark gray",
+       main=contrast_name, cex.main=1)
+  points(log2(sig$baseMean),sig$log2FoldChange,
+         pch=19, cex=0.5, col="red")
+  mtext(SUBHEADER,cex = 1)
+}
+
+make_volcano <- function(de,name) {
+    sig <- subset(de,padj<0.05)
+    N_SIG=nrow(sig)
+    N_UP=nrow(subset(sig,log2FoldChange>0))
+    N_DN=nrow(subset(sig,log2FoldChange<0))
+    DET=nrow(de)
+    HEADER=paste(N_SIG,"@5%FDR,", N_UP, "up", N_DN, "dn", DET, "detected")
+    plot(de$log2FoldChange,-log10(de$pval),cex=0.5,pch=19,col="darkgray",
+        main=name, xlab="log2 FC", ylab="-log10 pval", xlim=c(-6,6))
+    mtext(HEADER)
+    grid()
+    points(sig$log2FoldChange,-log10(sig$pval),cex=0.5,pch=19,col="red")
+}
+
+make_heatmap <- function(de,name,myss,mx,n=30){
+  colfunc <- colorRampPalette(c("blue", "white", "red"))
+  values <- myss$quickdash
+  f <- colorRamp(c("yellow", "orange"))
+  rr <- range(values)
+  svals <- (values-rr[1])/diff(rr)
+  colcols <- rgb(f(svals)/255)
+  mxn <- mx/rowSums(mx)*1000000
+  x <- mxn[which(rownames(mxn) %in% rownames(head(de,n))),]
+  heatmap.2(as.matrix(x),trace="none",col=colfunc(25),scale="row", margins = c(7,15), cexRow=0.9, cexCol=1.4,
+    main=paste("Top ranked",n,"genes in",name) )
+}
+
+maplot(dge,"ctrl vs mut")
+make_volcano(dge,"ctrl vs mut")
+make_heatmap(dge,"ctrl vs mut",ss,xxf,n=30)
+
+```
+
+Now look at the expression of ACADVL gene.
+
+```{r,acadvl}
+
+
+acadvl <- xx[grep("ACADVL",rownames(xx)),]
+
+acadvl
+
+rpm <- apply(xxf,2,function(x) { x/sum(x) * 1e6 } )
+
+acadvl <- rpm[grep("ACADVL",rownames(rpm)),]
+
+acadvl
+
+ctl <- acadvl[grep("Ctl",names(acadvl))]
+mut <- acadvl[grep("Mut",names(acadvl))]
+l <- list("Ctl"=ctl,"Mut"=mut)
+l
+summary(l[["Ctl"]])
+summary(l[["Mut"]])
+
+decrease= ( mean(l[["Ctl"]]) -  mean(l[["Mut"]]) ) / mean(l[["Ctl"]]) *100
+msg <- paste("Decrease:",signif(decrease,3),"%")
+
+boxplot(l,col="white",ylab="reads per million (RPM)",main="ACADVL RNA expression")
+beeswarm(l,add=TRUE,pch=19,cex=2,col="darkgray")
+mtext(msg)
+
+```
+
+
+## Pathway enrichment
+
+Here I'm using the mitch package and gene pathways from Reactome and Gene Ontology to understand gene changes caused by the mutation.
+
+Gene ontology terms obtained from GO website and converted to list format, downloaded in Feb 2024 (GO_bp_2023q4.Rds).
+
+```{r,mitch_reactome}
+
+reactome <- gmt_import("ReactomePathways_2025-03-14.gmt")
+
+gt <- as.data.frame(rownames(xx))
+gt$gene <- sapply(strsplit(gt[,1]," "),"[[",2)
+head(gt)
+
+m1 <- mitch_import(dge, DEtype="deseq2",geneTable=gt)
+dim(m1)
+mres_reactome <- mitch_calc(m1, reactome, priority="effect",cores=8)
+
+mres_reactome_top <- subset(mres_reactome$enrichment_result,p.adjustANOVA < 0.05 )
+
+head(mres_reactome_top,20) %>%
+  kbl(caption = "Top gene pathway differences caused by ALVCAD mutation") %>%
+  kable_paper("hover", full_width = F)
+
+write.table(mres_reactome$enrichment_result,file="mitch_mut_reactome.tsv",quote=FALSE,sep='\t')
+
+par(mar=c(5,27,3,3))
+top <- mres_reactome$enrichment_result
+top <- subset(top,p.adjustANOVA<0.05)
+nrow(top)
+up <- head(subset(top,s.dist>0),20)
+dn <- head(subset(top,s.dist<0),20)
+top <- rbind(up,dn)
+vec=top$s.dist
+names(vec)=top$set
+names(vec) <- gsub("_"," ",names(vec))
+vec <- vec[order(vec)]
+barplot(abs(vec),col=sign(-vec)+3,horiz=TRUE,las=1,cex.names=0.65,main="Ctl vs Mut",xlab="ES")
+grid()
+
+if ( ! file.exists("mitch_mut_reactome.html") ) {
+  mitch_report(res=mres_reactome,outfile="mitch_mut_reactome.html",overwrite=TRUE)
+}
+
+```
+
+Gene ontology.
+
+```{r,mitch_go}
+
+gobp <- gmt_import("gobp.msigdb.v2024.1.Hs.symbols.gmt")
+names(gobp) <- gsub("GOBP_","",names(gobp))
+names(gobp) <- gsub("_"," ",names(gobp))
+
+#download.file("https://ziemann-lab.net/public/tmp/go_2024-11.gmt",destfile="go_2024-11.gmt")
+#gobp <- gmt_import("go_2024-11.gmt")
+
+gt <- as.data.frame(rownames(xx))
+gt$gene <- sapply(strsplit(gt[,1]," "),"[[",2)
+head(gt)
+
+m1 <- mitch_import(dge, DEtype="deseq2",geneTable=gt)
+dim(m1)
+
+mres_gobp <- mitch_calc(m1, gobp, priority="effect",cores=8)
+
+mres_gobp_top <- subset(mres_gobp$enrichment_result,p.adjustANOVA < 0.05 )
+
+head(mres_gobp_top,20) %>%
+  kbl(caption = "Top GOBP differences caused by ALVCAD mutation") %>%
+  kable_paper("hover", full_width = F)
+
+write.table(mres_gobp$enrichment_result,file="mitch_mut_gobp.tsv",quote=FALSE,sep='\t')
+
+par(mar=c(5,27,3,3))
+top <- mres_gobp$enrichment_result
+top <- subset(top,p.adjustANOVA<0.05)
+nrow(top)
+up <- head(subset(top,s.dist>0),20)
+dn <- head(subset(top,s.dist<0),20)
+top <- rbind(up,dn)
+vec=top$s.dist
+names(vec)=top$set
+names(vec) <- gsub("_"," ",names(vec))
+vec <- vec[order(vec)]
+barplot(abs(vec),col=sign(-vec)+3,horiz=TRUE,las=1,cex.names=0.65,main="Ctl vs Mut",xlab="ES")
+grid()
+
+if ( ! file.exists("mitch_mut_gobp.html") ) {
+  mitch_report(res=mres_gobp,outfile="mitch_mut_gobp.html")
+}
+
+```
+
+## Network diagrams
+
+In these charts the darkness of the colour indicates the enrichment score.
+The size of the node indicates the number of genes in the set driving the enrichment.
+The width of the edges indicates the proportion of shared genes.
+
+```{r,netfuncs}
+
+map2color<-function(x,pal,limits=NULL){
+    if(is.null(limits)) limits=range(x)
+    pal[findInterval(x,seq(limits[1],limits[2],length.out=length(pal)+1), all.inside=TRUE)]
+}
+
+gs2net <- function(gset,em,colfunc=colorRampPalette(c("blue", "white","red"))(n=100)){
+  gset <- gset[order(names(gset))]
+  names(gset) <- lapply(names(gset), function(x) {
+    nn <- substr(x, 1, 60)
+    if (nchar(nn) == 60 ) {
+      nn <- paste(nn,"...",sep="")
+    }
+    return(nn)
+  } )
+  em$set <- lapply(em$set, function(x) {
+    nn <- substr(x, 1, 60)
+    if (nchar(nn) == 60 ) {
+      nn <- paste(nn,"...",sep="")
+    }
+    return(nn)
+  } )
+  mydf <- bind_rows(lapply(gset, as.data.frame.list))
+  rownames(mydf) <- names(gset)
+  j <- apply(mydf,1,function(x) {
+    apply(mydf,1,function(y) {
+      length(intersect(x,y) ) / length(union(x,y))
+    })
+  })
+  j[lower.tri(j)] <- NA
+  j[lower.tri(j,diag=TRUE)] <- 0
+  jl <- melt(j)
+  jl <- jl[which(jl$Var1 != jl$Var2),]
+  jl <- jl[which(jl$value != 1),]
+  jl <- jl[order(-jl$value),]
+  jl <- head(jl,length(gset)*2)
+  jl$edgeSize = jl$value/sum(jl$value)
+  nodes <- sort(union(jl[,1],jl[,2]))
+  lengths <- unlist(lapply(gset,length))
+  lengths <- lengths[names(lengths) %in% nodes]
+  nodes <- data.frame("nodes"=nodes,"lengths"=lengths)
+  nodes$vertexsize <- sqrt(nodes$lengths/sum(nodes$lengths) * 100)
+  nodes$es <- em[match(nodes$nodes,em$set),"s.dist"]
+  nodes$colours <- map2color(nodes$es,colfunc)
+  jl2 <- apply(jl[,1:2],2,as.character)
+  jlnet <- network(jl2)
+  plot(jlnet, displaylabels = TRUE, label.col = "steelblue",
+       edge.lwd = c(jl$edgeSize) * 100,
+       arrowhead.cex = 0,
+       label.cex = 0.8, vertex.border = "white",vertex.cex = nodes$vertexsize,
+       vertex.col = nodes$colours, edge.col = "black")
+  E1=min(nodes$es)
+  E5=max(nodes$es)
+  E3=mean(c(E1,E5))
+  EE <- c(E1,E3,E5)
+  legcols <- map2color(EE,colfunc)
+  legend("topleft", legend=signif(EE,2) ,title="ES",box.lty=0,
+    fill=legcols, cex=0.8)
+  S1=min(nodes$vertexsize)
+  FRAG=S1/10
+  S5=max(nodes$vertexsize)
+  S3=mean(c(S1,S5))
+  SS=c(S1-FRAG,0,S5-FRAG)
+  L1=min(nodes$lengths)
+  L5=max(nodes$lengths)
+  LL=paste(" ",c(L1,"",L5))
+  legend("topright", legend=LL ,title="no. genes",box.lty=0,
+    pt.cex=SS*1, cex=0.9 , pch=19,col="darkgray")
+  J1=min(jl$edgeSize)
+  FRAG=J1*3
+  J5=max(jl$edgeSize)
+  J3=mean(c(J1,J5))
+  JJ=c(J1,J3,J5)
+  JL=JJ+FRAG
+  legend("bottomleft", legend=signif(JJ,2) , lwd=JL*50, title="Jaccard",
+    box.lty=0, cex=0.9 , lty=1, col="black")
+}
+
+```
+
+Reactome up.
+
+```{r,reactome_netup,fig.width=14,fig.height=6}
+
+scores <- m1$x
+names(scores) <- rownames(m1)
+gs <- reactome
+up <- head(subset(mres_reactome$enrichment_result,p.adjustANOVA<0.05 & s.dist > 0),20)
+up_gs <- up[,1]
+up_gs <- gs[which(names(gs) %in% up_gs)]
+
+topgs_up <- lapply(1:length(up_gs),function(i) {
+  gsname <- names(up_gs)[i]
+  genes <- up_gs[[i]]
+  gene_scores <- scores[which(names(scores) %in% genes)]
+  top_genes <- names(which(gene_scores>2))
+  return(top_genes)
+})
+names(topgs_up) <- names(up_gs)
+
+gs2net(topgs_up,mres_reactome$enrichment_result,colorRampPalette(c("pink","darkred"))(n=100))
+
+topgs_up
+
+```
+
+Reactome down.
+
+```{r,reactome_netdn,fig.width=14,fig.height=6}
+
+scores <- m1$x
+names(scores) <- rownames(m1)
+gs <- reactome
+dn <- head(subset(mres_reactome$enrichment_result,p.adjustANOVA<0.05 & s.dist < 0),20)
+dn_gs <- dn[,1]
+dn_gs <- gs[which(names(gs) %in% dn_gs)]
+
+topgs_dn <- lapply(1:length(dn_gs),function(i) {
+  gsname <- names(dn_gs)[i]
+  genes <- dn_gs[[i]]
+  gene_scores <- scores[which(names(scores) %in% genes)]
+  top_genes <- names(which(gene_scores<2))
+  return(top_genes)
+})
+names(topgs_dn) <- names(dn_gs)
+
+gs2net(topgs_dn,mres_reactome$enrichment_result,colorRampPalette(c("darkblue","lightblue"))(n=100))
+
+topgs_dn
+
+```
+
+GO BP up.
+
+```{r,gobp_netup,fig.width=14,fig.height=6}
+
+scores <- m1$x
+names(scores) <- rownames(m1)
+gs <- gobp
+up <- head(subset(mres_gobp$enrichment_result,p.adjustANOVA<0.05 & s.dist > 0),20)
+up_gs <- up[,1]
+up_gs <- gs[which(names(gs) %in% up_gs)]
+
+topgs_up <- lapply(1:length(up_gs),function(i) {
+  gsname <- names(up_gs)[i]
+  genes <- up_gs[[i]]
+  gene_scores <- scores[which(names(scores) %in% genes)]
+  top_genes <- names(which(gene_scores>2))
+  return(top_genes)
+})
+names(topgs_up) <- names(up_gs)
+
+gs2net(topgs_up,mres_gobp$enrichment_result,colorRampPalette(c("pink","darkred"))(n=100))
+
+topgs_up
+
+```
+
+GO BP down.
+
+```{r,gobp_netdn,fig.width=14,fig.height=6}
+
+scores <- m1$x
+names(scores) <- rownames(m1)
+gs <- gobp
+dn <- head(subset(mres_gobp$enrichment_result,p.adjustANOVA<0.05 & s.dist < 0),20)
+dn_gs <- dn[,1]
+dn_gs <- gs[which(names(gs) %in% dn_gs)]
+
+topgs_dn <- lapply(1:length(dn_gs),function(i) {
+  gsname <- names(dn_gs)[i]
+  genes <- dn_gs[[i]]
+  gene_scores <- scores[which(names(scores) %in% genes)]
+  top_genes <- names(which(gene_scores<2))
+  return(top_genes)
+})
+names(topgs_dn) <- names(dn_gs)
+
+gs2net(topgs_dn,mres_gobp$enrichment_result,colorRampPalette(c("darkblue","lightblue"))(n=100))
+
+topgs_dn
+
+```
+
+## Session information
+
+```{r,save}
+
+sessionInfo()
+
+save.image("dge.Rdata")
+
+```
