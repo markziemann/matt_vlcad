@@ -281,17 +281,6 @@ heatmap.2(cor_matrix,trace="none")
 
 After log transformation, the contamination is not so obvious.
 
-Data Quality Assessment - Define z before PCA
-Filter proteins with fewer missing values (e.g., less than 3 missing)
-
-```{r}
-z <- y[which(nas < 3), ]
-cat("\nDATA QUALITY ASSESSMENT\n")
-cat("Original data:", nrow(y), "proteins\n")
-cat("After filtering (< 3 missing values):", nrow(z), "proteins\n")
-cat("Proteins retained:", round(nrow(z)/nrow(y) * 100, 1), "%\n")
-```
-
 # Data normalisation
 
 Handle remaining missing values in filtered data
@@ -528,7 +517,7 @@ de_summary
 
 Looking at the DE results
 
-```{deres1}
+```{r,deres1}
 
 results <- topTable(fit, coef = 2, number = Inf)
 
@@ -686,7 +675,7 @@ barplot(abs(tops),
 
 Make detailed pathway report.
 
-```{rmitchreport1}
+```{r,mitchreport1}
 
 mitch_report(res=mres,outfile="vlcad_ko_reactome.html",overwrite=TRUE)
 
