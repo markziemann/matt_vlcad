@@ -1,0 +1,702 @@
+---
+title: "Analysis of proteomics data for Shashwat - VLCAD knock out"
+author: "Burnet Bioinformatics Group"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: simplex
+    toc: true
+    code_folding: hide
+    fig_width: 7
+    fig_height: 7
+    toc_float:
+      collapsed: true
+---
+
+# Intro
+
+Here we are running an analysis of DIA based proteomics of control and VLCAD knock-out cells.
+Samples 1-4 are KO and 5-8 are control.
+
+I have run fragpipe with LFQ pipeline.
+
+Here I will do an exploratory data analysis.
+
+This will include QC analysis, PCA, quantile normalisation and differential expression with limma.
+
+```{r,libraries}
+
+library("pcaMethods") #BioC
+library("limma")
+library("kableExtra")
+library("gplots")
+library("mitch")
+
+```
+
+Now I'll read in the data.
+
+```{r,read1}
+# Load the data
+x <- read.table("report.pg_matrix.tsv", header=TRUE, sep="\t")
+
+# Clean column names
+colnames(x) <- gsub("X.matt_proteomics.250711_MM_11262_","", colnames(x))
+colnames(x) <- gsub("_uncalibrated.mzML", "", colnames(x))
+
+# tidy cols
+y <- x[,c("Protein.Group","Protein.Ids","Genes","1","2","3","4","5","6","7","8")]
+
+# Set row names
+rownames(y) <- paste(y$Protein.Ids, y$Genes, sep = "_")
+
+# Extract intensity data
+y <- y[,4:11]
+
+# fix colnames
+colnames(y) <- c("KO1","KO2","KO3","KO4","CTL1","CTL2","CTL3","CTL4")
+
+
+# Display data dimensions and first few rows
+cat("Data dimensions:", nrow(y), "proteins x", ncol(y), "samples\n")
+cat("FIRST 6 ROWS OF INTENSITY DATA\n")
+head(y) %>%
+  kbl(caption="Top few rows of the dataset") %>%
+  kable_paper("hover", full_width = F)
+
+```
+
+# Quality control
+
+Now we can run an analysis of missing values.
+
+```{r,missing1}
+total_values <- nrow(y) * ncol(y)
+total_missing <- sum(is.na(y))
+missing_percentage <- (total_missing / total_values) * 100
+
+cat("\nOVERALL MISSING DATA SUMMARY\n")
+cat("Total values:", total_values, "\n")
+cat("Total missing:", total_missing, "\n")
+cat("Overall missing percentage:", round(missing_percentage, 2), "%\n")
+
+# Missing data per sample
+missing_per_sample <- colSums(is.na(y))
+missing_per_sample_pct <- (missing_per_sample / nrow(y)) * 100
+
+missing_summary <- data.frame(
+  Sample = names(missing_per_sample),
+  Missing_Count = missing_per_sample,
+  Missing_Percent = round(missing_per_sample_pct, 2)
+)
+
+cat("\nMISSING DATA PER SAMPLE\n")
+print(missing_summary)
+
+# by protein
+nas <- apply(X = y, MARGIN = 1, function(x){ 
+  length(which(is.na(x))) 
+})
+missing_proteins_table <- table(nas)
+
+cat("\nDATA DISTRIBUTION ACROSS PROTEINS\n")
+cat("Number of proteins by missing value count:\n")
+print(missing_proteins_table)
+
+cat("\nSummary of missing values per protein:\n")
+print(summary(nas))
+
+```
+
+Overall 2.7% missing values which is very good.
+
+Now remove proteins with more than 4 missing values.
+
+```{r,filt1}
+
+table(nas >4)
+
+nrow(y[nas <5,])
+
+y2 <- y[nas <5,]
+
+dim(y2)
+dim(y)
+
+```
+
+```{r,datasummary}
+
+summary(y2)
+apply(y2,2,median,na.rm=TRUE)
+apply(y2,2,mean,na.rm=TRUE)
+
+```
+
+Intensities are fairly even.
+
+Data Visualization - Raw Distribution
+
+Boxplot of raw and log-transformed abundances
+
+```{r,viz1}
+# Boxplot of raw abundances
+par(mfrow = c(1, 1), mar = c(5, 4, 3, 1))
+
+# Raw scale boxplot
+boxplot(y2, las = 2, main = "Raw Abundance Distribution",
+        ylab = "Abundance", cex.axis = 0.6, col = rainbow(ncol(y2)))
+
+# Log-transformed boxplot for better visualization
+y_log <- log10(y2 + 1)  # Add 1 to handle zeros if any
+boxplot(y_log, las = 2, main = "Log10(Abundance + 1) Distribution",
+        ylab = "Log10(Abundance + 1)", cex.axis = 0.6, col = rainbow(ncol(y2)))
+
+```
+
+Protein Abundance Analysis
+
+```{r,abundance1}
+
+# Protein Abundance Analysis
+# Calculate protein statistics
+protein_stats <- data.frame(
+  Protein = rownames(y),
+  Mean_Abundance = rowMeans(y, na.rm = TRUE),
+  Median_Abundance = apply(y, 1, median, na.rm = TRUE),
+  SD_Abundance = apply(y, 1, sd, na.rm = TRUE),
+  CV = apply(y, 1, sd, na.rm = TRUE) / rowMeans(y, na.rm = TRUE),
+  Missing_Count = nas
+)
+
+cat("\nPROTEIN ABUNDANCE SUMMARY\n")
+cat("Mean abundance across all proteins:\n")
+print(summary(protein_stats$Mean_Abundance))
+
+cat("\nCoefficient of Variation (CV) summary:\n")
+print(summary(protein_stats$CV))
+
+# Top 10 most abundant proteins
+high_abundance <- head(protein_stats[order(protein_stats$Mean_Abundance, decreasing = TRUE), ], 10)
+
+cat("\nTOP 10 MOST ABUNDANT PROTEINS\n")
+print(high_abundance[, c("Protein", "Mean_Abundance", "Missing_Count")])
+
+```
+
+Top 10 most variable proteins by CV
+
+```{r,mostvariable}
+
+high_variable <- head(protein_stats[order(protein_stats$CV, decreasing = TRUE), ], 10)
+
+cat("\nTOP 10 MOST VARIABLE PROTEINS (by Coefficient of Variation)\n")
+#Round only the numeric columns, keep Protein column as-is
+high_variable_display <- high_variable[, c("Protein", "Mean_Abundance", "CV", "Missing_Count")]
+high_variable_display[, c("Mean_Abundance", "CV")] <- round(high_variable_display[, c("Mean_Abundance", "CV")], 3)
+high_variable_display[, "Missing_Count"] <- round(high_variable_display[, "Missing_Count"], 0)  # Missing count should be integer
+print(high_variable_display)
+
+```
+
+Looks like keratin is highly variable could be some contamination going on.
+
+# Visualization of CV distribution
+
+```{r,cvdist1}
+
+hist(protein_stats$CV[!is.infinite(protein_stats$CV)], 
+     breaks = 50, main = "Distribution of Coefficient of Variation", 
+     xlab = "CV", ylab = "Frequency", 
+     col = "lightblue", border = "darkblue")
+
+```
+
+Now look at the sample correlation matrix.
+
+```{r,corrmx1}
+
+cor_matrix <- cor(y2, use = "complete.obs")
+
+cat("\nSAMPLE CORRELATION MATRIX\n")
+print(round(cor_matrix, 3))
+
+# Identify sample groups
+chrom_samples <- grepl("Chrom", colnames(y))
+sol_samples <- grepl("Sol", colnames(y))
+
+# Calculate group-wise correlations
+chrom_cor <- cor_matrix[chrom_samples, chrom_samples]
+sol_cor <- cor_matrix[sol_samples, sol_samples]
+between_cor <- cor_matrix[chrom_samples, sol_samples]
+
+cat("\nCORRELATION SUMMARY\n")
+cat("Average within-Chromatin correlation:", round(mean(chrom_cor[upper.tri(chrom_cor)]), 3), "\n")
+cat("Average within-Soluble correlation:", round(mean(sol_cor[upper.tri(sol_cor)]), 3), "\n")
+cat("Average between-condition correlation:", round(mean(between_cor), 3), "\n")
+
+cor_matrix
+heatmap.2(cor_matrix,trace="none")
+
+```
+
+Looks like KO2 could be an outlier.
+
+```{r,outlier1}
+
+heatmap.2(as.matrix(y2[grep("KRT",rownames(y2)),]),trace="none",scale="row",margin=c(5,10))
+
+```
+
+The heatmap shows KO2 is contaminated with keratin.
+Suggest excluding it from downstream analysis.
+
+Repeat analysis with y_log
+
+```{r,corrmx_log1}
+
+cor_matrix <- cor(y_log, use = "complete.obs")
+
+cat("\nSAMPLE CORRELATION MATRIX\n")
+print(round(cor_matrix, 3))
+
+# Identify sample groups
+chrom_samples <- grepl("Chrom", colnames(y))
+sol_samples <- grepl("Sol", colnames(y))
+
+# Calculate group-wise correlations
+chrom_cor <- cor_matrix[chrom_samples, chrom_samples]
+sol_cor <- cor_matrix[sol_samples, sol_samples]
+between_cor <- cor_matrix[chrom_samples, sol_samples]
+
+cat("\nCORRELATION SUMMARY\n")
+cat("Average within-Chromatin correlation:", round(mean(chrom_cor[upper.tri(chrom_cor)]), 3), "\n")
+cat("Average within-Soluble correlation:", round(mean(sol_cor[upper.tri(sol_cor)]), 3), "\n")
+cat("Average between-condition correlation:", round(mean(between_cor), 3), "\n")
+
+cor_matrix
+heatmap.2(cor_matrix,trace="none")
+
+```
+
+After log transformation, the contamination is not so obvious.
+
+Data Quality Assessment - Define z before PCA
+Filter proteins with fewer missing values (e.g., less than 3 missing)
+
+```{r}
+z <- y[which(nas < 3), ]
+cat("\nDATA QUALITY ASSESSMENT\n")
+cat("Original data:", nrow(y), "proteins\n")
+cat("After filtering (< 3 missing values):", nrow(z), "proteins\n")
+cat("Proteins retained:", round(nrow(z)/nrow(y) * 100, 1), "%\n")
+```
+
+# Data normalisation
+
+Handle remaining missing values in filtered data
+
+```{r,norm1}
+
+for(i in 1:ncol(y2)) {
+  if(any(is.na(y2[,i]))) {
+    min_val <- min(y2[,i], na.rm = TRUE)
+    y2[is.na(y2[,i]), i] <- min_val * 0.1
+  }
+}
+
+cat("Missing values after imputation:", sum(is.na(y2)), "\n")
+
+#Log10 transformation
+yl <- log10(y2 + 1)
+cat("Log10 transformation completed\n")
+
+#Between-array normalization
+yn <- normalizeBetweenArrays(yl, method = "quantile", targets = NULL, cyclic.method = "fast")
+cat("Between-array normalization completed\n")
+
+cat("Final normalized data dimensions:", nrow(yn), "x", ncol(yn), "\n")
+
+```
+
+NORMALIZATION VALIDATION
+
+Before and after comparison
+
+```{r,norm2}
+
+cat("Raw data range:", round(range(y2), 0), "\n")
+cat("Normalized data range:", round(range(yn), 2), "\n")
+
+# Sample median variability
+raw_medians <- apply(y2, 2, median)
+norm_medians <- apply(yn, 2, median)
+
+cat("CV of sample medians (raw):", round(sd(raw_medians)/mean(raw_medians), 3), "\n")
+cat("CV of sample medians (normalized):", round(sd(norm_medians)/mean(norm_medians), 3), "\n")
+
+# Correlation preservation
+cor_raw <- cor(y2)
+cor_norm <- cor(yn)
+
+ko_idx <- grepl("KO", colnames(yn))
+ctl_idx <- grepl("CTL", colnames(yn))
+
+cat("Within-Chromatin correlation (normalized):", 
+    round(mean(cor_norm[ko_idx, ko_idx][upper.tri(cor_norm[ko_idx, ko_idx])]), 3), "\n")
+cat("Within-Soluble correlation (normalized):", 
+    round(mean(cor_norm[ctl_idx, ctl_idx][upper.tri(cor_norm[ctl_idx, ctl_idx])]), 3), "\n")
+```
+
+VISUALIZATION COMPARISON
+
+```{r,vizcomp1}
+
+par(mfrow = c(2, 2), mar = c(6, 4, 3, 1))
+
+# Raw data
+boxplot(log10(y2 + 1), las = 2, main = "Raw Data (Log10 scale)",
+        cex.axis = 0.6, col = rainbow(ncol(y2)))
+
+# Log10 transformed
+boxplot(yl, las = 2, main = "Log10 Transformed",
+        cex.axis = 0.6, col = rainbow(ncol(yl)))
+
+# Final normalized(quantile)
+boxplot(yn, las = 2, main = "Final Normalized",
+        cex.axis = 0.6, col = rainbow(ncol(yn)))
+
+par(mfrow = c(1, 1))
+
+```
+
+Looks OK.
+
+Sample completeness
+
+```{r,sample_completeness1}
+
+sample_completeness <- (1 - missing_per_sample_pct/100) * 100
+cat("\nSample completeness (%):\n")
+for(i in 1:length(sample_completeness)) {
+  cat(names(sample_completeness)[i], ":", round(sample_completeness[i], 1), "%\n")
+}
+
+```
+
+# PCA Analysis
+
+Use filtered data (z) with fewer missing values
+Transpose data so samples are rows (pcaMethods expects this format)
+
+Perform PPCA (handles missing values)
+
+```{r,pca1}
+
+pc <- pca(t(y2), nPcs = 3, method = "ppca")
+
+print(pc)
+
+cat("\nPCA Summary:\n")
+cat("Number of components:", pc@nPcs, "\n")
+cat("Method used:", pc@method, "\n")
+cat("Variance explained by each PC:\n")
+print(round(pc@R2, 3))
+
+cat("\nCumulative variance explained:\n")
+print(round(pc@R2cum, 3))
+
+# Scores plot (samples)
+par(mar = c(5,4,3,1))
+slplot(pc, main = "PCA Scores Plot", cex = 0.8, cex.axis = 0.8)
+
+# Manual scores plot with sample group colors
+scores <- pc@scores
+chrom_color <- ifelse(grepl("KO", rownames(scores)), "red", "blue")
+
+plot(scores[,1], scores[,2], col = chrom_color, pch = 19, cex = 1.5,
+     main = "PCA Scores - PC1 vs PC2",
+     xlab = paste0("PC1 (", round(pc@R2[1]*100, 1), "% variance)"),
+     ylab = paste0("PC2 (", round(pc@R2[2]*100, 1), "% variance)"))
+
+# Add sample labels
+text(scores[,1], scores[,2], labels = rownames(scores), pos = 3, cex = 0.7)
+
+# Add legend
+legend("topright", legend = c("KO", "CTL"),
+       col = c("red", "blue"), pch = 19, cex = 0.8)
+```
+
+# Now exclude KO2
+
+```{r,pca2}
+
+y3 <- y2[,grep("KO2",colnames(y2),invert=TRUE)]
+
+pc <- pca(t(y3), nPcs = 3, method = "ppca")
+
+print(pc)
+
+cat("\nPCA Summary:\n")
+cat("Number of components:", pc@nPcs, "\n")
+cat("Method used:", pc@method, "\n")
+cat("Variance explained by each PC:\n")
+print(round(pc@R2, 3))
+
+cat("\nCumulative variance explained:\n")
+print(round(pc@R2cum, 3))
+
+# Scores plot (samples)
+par(mar = c(5,4,3,1))
+slplot(pc, main = "PCA Scores Plot", cex = 0.8, cex.axis = 0.8)
+
+# Manual scores plot with sample group colors
+scores <- pc@scores
+chrom_color <- ifelse(grepl("KO", rownames(scores)), "red", "blue")
+
+plot(scores[,1], scores[,2], col = chrom_color, pch = 19, cex = 1.5,
+     main = "PCA Scores - PC1 vs PC2",
+     xlab = paste0("PC1 (", round(pc@R2[1]*100, 1), "% variance)"),
+     ylab = paste0("PC2 (", round(pc@R2[2]*100, 1), "% variance)"))
+
+# Add sample labels
+text(scores[,1], scores[,2], labels = rownames(scores), pos = 3, cex = 0.7)
+
+# Add legend
+legend("topleft", legend = c("KO", "CTL"),
+       col = c("red", "blue"), pch = 19, cex = 0.8)
+```
+
+# Normalisation part 2
+
+Now do normalisation on the data after removing KO2.
+
+```{r,norm3}
+
+#Log10 transformation
+yl <- log10(y3 + 1)
+cat("Log10 transformation completed\n")
+
+#Between-array normalization
+yn <- normalizeBetweenArrays(yl, method = "quantile", targets = NULL, cyclic.method = "fast")
+cat("Between-array normalization completed\n")
+
+cat("Final normalized data dimensions:", nrow(yn), "x", ncol(yn), "\n")
+
+```
+
+# Differential analysis
+
+Make a sample sheet.
+
+```{r,ss1}
+
+ss <- as.data.frame(colnames(yn))
+ss$ko <- grepl("KO",ss[,1])
+rownames(ss) <- ss[,1]
+ss[,1]=NULL
+
+ss %>%
+  kbl(caption="Top few rows of the dataset") %>%
+  kable_paper("hover", full_width = F)
+
+```
+
+Design matrix.
+
+```{r,des1}
+
+design <- model.matrix(~ ko, data = ss)
+
+print(design)
+
+```
+
+Fit linear models and apply empirical Bayes moderation
+
+```{r,limma1}
+
+fit <- lmFit(yn, design)
+fit <- eBayes(fit)
+
+# Summary of differential expression
+de_summary <- summary(decideTests(fit))
+
+de_summary
+
+```
+
+Looking at the DE results
+
+```{deres1}
+
+results <- topTable(fit, coef = 2, number = Inf)
+
+# Calculate key statistics
+total_proteins <- nrow(results)
+significant_proteins <- sum(results$adj.P.Val < 0.05)
+sig_rate <- round((significant_proteins / total_proteins) * 100, 1)
+
+# Display most significant results
+head(results, 20) %>%
+  kbl(caption="Top 20 DE proteins") %>%
+  kable_paper("hover", full_width = F)
+
+upregulated <- results[results$logFC > 0 & results$adj.P.Val < 0.05, ]    # KO-enriched
+downregulated <- results[results$logFC < 0 & results$adj.P.Val < 0.05, ]  # CTL-enriched
+
+upregulated %>%
+  kbl(caption="Upregulated proteins") %>%
+  kable_paper("hover", full_width = F)
+
+downregulated %>%
+  kbl(caption="Downregulated proteins") %>%
+  kable_paper("hover", full_width = F)
+
+sig_up <- nrow(upregulated)
+sig_down <- nrow(downregulated)
+not_sig <- total_proteins - sig_up - sig_down
+
+# Create classification summary
+classification_summary <- data.frame(
+  Category = c("Chromatin-enriched", "Soluble-enriched", "Not Significant"),
+  Count = c(sig_up, sig_down, not_sig),
+  Percentage = round(c(sig_up, sig_down, not_sig) / total_proteins * 100, 1)
+)
+
+classification_summary %>%
+  kbl(caption="DE summary") %>%
+  kable_paper("hover", full_width = F)
+
+```
+
+Volcano plot.
+
+```{r,volcano}
+
+sig <- subset(results,adj.P.Val < 0.05)
+
+plot(results$logFC,-log10(results$P.Value),
+  pch=19,cex=0.6,col="gray",bty="n",
+  xlab="log2 fold change",
+  ylab="-log10(p-value)")
+
+points(sig$logFC,-log10(sig$P.Value),pch=19,cex=0.65,col="red")
+
+protnames <- sapply(strsplit(rownames(sig),"_"),"[[",2)
+text(sig$logFC,-log10(sig$P.Value),labels=protnames,srt = -30)
+
+```
+
+Heatmap
+
+```{r,heat1}
+
+topn=10
+top <- as.matrix(yn[which(rownames(yn) %in% rownames(head(results,topn))),])
+
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+
+heatmap.2(cor_matrix,trace="none",scale="row")
+
+heatmap.2( top, col=colfunc(25),scale="row",
+ trace="none",margins = c(5,15), cexRow=0.9, main="Top 10 genes")
+
+```
+
+Output results as tsv.
+
+```{r,output}
+
+ym <- merge(results,yn,by=0)
+
+colnames(ym)[1] <- "ProteinID"
+write.table(x=ym,file="vlcad_ko_de.tsv",quote=F,sep="\t",row.names=FALSE)
+
+ym <- ym[order(ym$P.Value),]
+
+```
+
+# Pathway Enrichment
+
+First get the pathways from Reactome.
+
+Then run mitch.
+
+```{r,mitch1}
+
+pw <- gmt_import("ReactomePathways_2025-10-31.gmt")
+
+gt <- data.frame(rownames(results))
+gt$name <- sapply(lapply(strsplit(gt[,1],"_"),function(x) { c(x,"x") } ),"[[",2) #substitute x if there's no gene name
+table(which(gt$name =="x"))
+
+m <- mitch_import(x=results,DEtype="limma",geneTable=gt)
+
+# sanity checks
+head(m[order(m$x),,drop=FALSE])
+tail(m[order(m$x),,drop=FALSE])
+
+mres <- mitch_calc(x=m,genesets=pw,minsetsize=5,cores=8,priority="effect")
+
+NTOT <- nrow(mres$enrichment_result)
+
+mresig <- subset(mres$enrichment_result,p.adjustANOVA<0.05)
+
+NSIG <- nrow((mresig))
+
+NUP <- nrow(subset(mresig,s.dist>0))
+NDN <- nrow(subset(mresig,s.dist<0))
+
+head(subset(mresig,s.dist>0),20) %>%
+  kbl(caption="Top upregulated pathways (effect size)") %>%
+  kable_paper("hover", full_width = F)
+
+head(subset(mresig,s.dist<0),20) %>%
+  kbl(caption="Top downregulated pathways (effect size)") %>%
+  kable_paper("hover", full_width = F)
+
+```
+
+Bar plot of top results.
+
+```{r,bar1}
+
+ups <- head(subset(mresig,s.dist>0),20)[,c("s.dist")]
+names(ups) <- head(subset(mresig,s.dist>0),20)[,c("set")]
+
+dns <- head(subset(mresig,s.dist<0),20)[,c("s.dist")]
+names(dns) <- head(subset(mresig,s.dist<0),20)[,c("set")]
+
+tops <- c(ups,dns)
+
+tops <- sort(tops)
+
+par(mar=c(5,25,5,1))
+
+cols <- c(rep("blue",length(dns)),rep("red",length(ups)))
+
+barplot(abs(tops),
+  horiz=TRUE,las=1,cex.names=0.65,col=cols,
+  main="top DE Reactomes",
+  xlab="ES",
+  cex.main=0.9)
+
+```
+
+Make detailed pathway report.
+
+```{rmitchreport1}
+
+mitch_report(res=mres,outfile="vlcad_ko_reactome.html",overwrite=TRUE)
+
+```
+# Session information
+
+For reproducibility.
+
+```{r,session}
+
+sessionInfo()
+
+```
